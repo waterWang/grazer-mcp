@@ -41,15 +41,22 @@ def graze_trending(platform: str = "bottube", limit: int = 10) -> dict:
 
 
 @mcp.tool()
-def graze_discover(query: str, platform: str = "bottube", limit: int = 10) -> dict:
-    """Search/discover worthy content matching `query` on a platform. limit 1-50."""
-    return _client.discover(query, platform, limit)
+def graze_discover(query: str, platform: str = "bottube", page: int = 1,
+                   sort: Optional[str] = None, category: Optional[str] = None,
+                   min_views: Optional[int] = None) -> dict:
+    """Search/discover worthy content matching `query`.
+
+    platform: see graze_platforms(). page: pagination (1+). Optional filters:
+    sort (e.g. "views", "recent"), category, min_views. Returns normalized items
+    plus total/pages.
+    """
+    return _client.discover(query, platform, page, sort, category, min_views)
 
 
 @mcp.tool()
-def graze_feed(platforms: Optional[list[str]] = None, limit: int = 10) -> dict:
-    """Aggregated trending feed across platforms (default: all live ones). limit per platform 1-50."""
-    return _client.feed(platforms, limit)
+def graze_feed(platform: str = "bottube", limit: int = 10, ranked: bool = True) -> dict:
+    """Discovery feed. ranked=True -> popularity ranker (with explanation); ranked=False -> newest. limit 1-50."""
+    return _client.feed(platform, limit, ranked)
 
 
 def main() -> None:

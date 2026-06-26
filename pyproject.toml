@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "grazer-mcp"
-version = "0.1.0"
+version = "0.2.0"
 description = "Multi-platform content discovery for AI agents over the Model Context Protocol (MCP). Graze worthy content across BoTTube and beyond."
 readme = "README.md"
 license = { text = "MIT" }

@@ -1,8 +1,14 @@
 #!/usr/bin/env python3
 """Grazer discovery client — pure logic, no MCP dependency (fully unit-testable).
 
-Stable error contract: every method returns {"ok": True, ...} or a predictable
-{"ok": False, "error": {...}} object, never a silent empty result.
+Wired to the LIVE BoTTube discovery API (verified 2026-06-26):
+  trending: GET /api/trending?limit=N
+  search:   GET /api/search?q=...&page=N[&sort=&category=&min_views=]
+  feed:     GET /api/v2/feed?limit=N  (ranked)  |  /api/feed?limit=N  (latest)
+
+Every method returns {"ok": True, ...} or a predictable {"ok": False, "error": {...}}
+object, never a silent empty result. Video objects are normalized to a common shape
+so the surface is stable as platforms are added.
 """
 from __future__ import annotations
 
@@ -11,9 +17,10 @@ from typing import Any, Optional
 
 import httpx
 
-# Supported platforms. Keep status honest: "live" = backed now, others declared.
+# Supported platforms. Keep status honest: "live" = backed now.
 PLATFORMS = {
-    "bottube": {"status": "live", "description": "BoTTube AI-native video platform"},
+    "bottube": {"status": "live", "description": "BoTTube AI-native video platform",
+                "base": "https://bottube.ai"},
 }
 
 
@@ -37,11 +44,13 @@ class GrazerClient:
         self.timeout = timeout if timeout is not None else float(os.environ.get("GRAZER_TIMEOUT", "20"))
         self._transport = transport  # for tests (httpx.MockTransport)
 
+    # --- transport --- #
     def _get(self, path: str, params: Optional[dict] = None) -> dict:
+        params = {k: v for k, v in (params or {}).items() if v is not None}
         try:
             with httpx.Client(timeout=self.timeout, follow_redirects=True,
                               transport=self._transport) as c:
-                r = c.get(f"{self.base_url}{path}", params=params or {})
+                r = c.get(f"{self.base_url}{path}", params=params)
         except httpx.TimeoutException:
             return err("UPSTREAM_TIMEOUT", f"{path} did not respond before {self.timeout}s")
         except httpx.HTTPError as e:
@@ -54,11 +63,37 @@ class GrazerClient:
         except ValueError:
             return err("UPSTREAM_BAD_JSON", f"{path} returned non-JSON", retryable=False)
 
+    # --- helpers --- #
     def _check_platform(self, platform: str) -> Optional[dict]:
         if platform not in PLATFORMS:
             return err("UNKNOWN_PLATFORM", f"unsupported platform: {platform}",
                        retryable=False, supported=list(PLATFORMS))
         return None
+
+    def _abs(self, p: Any) -> Any:
+        return f"{self.base_url}{p}" if isinstance(p, str) and p.startswith("/") else p
+
+    def _normalize(self, v: dict) -> dict:
+        """Map a BoTTube video object to grazer's common content shape."""
+        return {
+            "id": v.get("video_id") or v.get("id"),
+            "title": v.get("title"),
+            "agent": v.get("agent_name") or v.get("display_name"),
+            "views": v.get("views"),
+            "likes": v.get("likes"),
+            "category": v.get("category_name") or v.get("category"),
+            "duration_sec": v.get("duration_sec"),
+            "url": self._abs(v.get("watch_url") or v.get("url")),
+            "thumbnail": self._abs(v.get("thumbnail_url")),
+            "created_at": v.get("created_at"),
+            "tags": v.get("tags"),
+        }
+
+    @staticmethod
+    def _videos(data: Any) -> list:
+        if isinstance(data, dict):
+            return data.get("videos", []) or []
+        return data if isinstance(data, list) else []
 
     # --- public surface (mirrored by the MCP tools) --- #
     def platforms(self) -> dict:
@@ -68,28 +103,38 @@ class GrazerClient:
         if (e := self._check_platform(platform)):
             return e
         res = self._get("/api/trending", {"limit": clamp(limit, 1, 50)})
-        return res if not res["ok"] else {"ok": True, "platform": platform, "items": res["data"]}
+        if not res["ok"]:
+            return res
+        items = [self._normalize(v) for v in self._videos(res["data"])]
+        return {"ok": True, "platform": platform, "count": len(items), "items": items}
 
-    def discover(self, query: str, platform: str = "bottube", limit: int = 10) -> dict:
+    def discover(self, query: str, platform: str = "bottube", page: int = 1,
+                 sort: Optional[str] = None, category: Optional[str] = None,
+                 min_views: Optional[int] = None) -> dict:
         if not query or not query.strip():
             return err("BAD_REQUEST", "query is required", retryable=False)
         if (e := self._check_platform(platform)):
             return e
-        res = self._get("/api/search", {"q": query.strip(), "limit": clamp(limit, 1, 50)})
-        return res if not res["ok"] else {"ok": True, "platform": platform,
-                                          "query": query.strip(), "items": res["data"]}
+        res = self._get("/api/search", {"q": query.strip(), "page": clamp(page, 1, 10_000),
+                                         "sort": sort, "category": category, "min_views": min_views})
+        if not res["ok"]:
+            return res
+        d = res["data"] if isinstance(res["data"], dict) else {}
+        items = [self._normalize(v) for v in self._videos(res["data"])]
+        return {"ok": True, "platform": platform, "query": query.strip(),
+                "page": d.get("page", page), "pages": d.get("pages"), "total": d.get("total"),
+                "count": len(items), "items": items}
 
-    def feed(self, platforms: Optional[list[str]] = None, limit: int = 10) -> dict:
-        targets = platforms or [p for p, m in PLATFORMS.items() if m["status"] == "live"]
-        feed: dict[str, Any] = {}
-        errors: dict[str, Any] = {}
-        for p in targets:
-            if (e := self._check_platform(p)):
-                errors[p] = e["error"]
-                continue
-            r = self.trending(p, limit)
-            if r["ok"]:
-                feed[p] = r["items"]
-            else:
-                errors[p] = r["error"]
-        return {"ok": feed != {}, "feed": feed, "errors": errors or None}
+    def feed(self, platform: str = "bottube", limit: int = 10, ranked: bool = True) -> dict:
+        """Discovery feed. ranked=True -> the popularity ranker (/api/v2/feed),
+        ranked=False -> newest (/api/feed)."""
+        if (e := self._check_platform(platform)):
+            return e
+        res = self._get("/api/v2/feed" if ranked else "/api/feed", {"limit": clamp(limit, 1, 50)})
+        if not res["ok"]:
+            return res
+        d = res["data"] if isinstance(res["data"], dict) else {}
+        items = [self._normalize(v) for v in self._videos(res["data"])]
+        return {"ok": True, "platform": platform, "ranked": ranked,
+                "ranker": d.get("mode"), "explanation": d.get("explanation"),
+                "count": len(items), "items": items}
