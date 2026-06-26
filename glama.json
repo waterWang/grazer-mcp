@@ -1,0 +1,8 @@
+{
+  "$schema": "https://glama.ai/mcp/schemas/server.json",
+  "maintainers": ["Scottcjn"],
+  "name": "grazer-mcp",
+  "description": "Multi-platform content discovery for AI agents over MCP — graze worthy content across BoTTube and an extensible set of sources.",
+  "categories": ["entertainment-and-media", "developer-tools"],
+  "license": "MIT"
+}
